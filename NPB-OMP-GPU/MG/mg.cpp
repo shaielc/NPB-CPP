@@ -313,17 +313,8 @@ int main(int argc, char *argv[]){
 	for(i=T_BENCH; i<T_LAST; i++){
 		timer_clear(i);
 	}
+////////////////////////////////////////////////////////////////////////////////
 	timer_start(T_BENCH);
-
-	// Just testing GPU works
-    #pragma omp target enter data map(to: it)
-    {
-      int asdf = 0;
-    }
-    #pragma omp target exit data map(from: it)
-
-	#pragma omp parallel firstprivate(nit) private(it)
-    {
 
 		if(timeron){
 			#pragma omp master
@@ -370,9 +361,9 @@ int main(int argc, char *argv[]){
 		}
 	
 		norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
-	} /* end parallel */
 
 	timer_stop(T_BENCH);
+////////////////////////////////////////////////////////////////////////////////
 
 	t = timer_read(T_BENCH);    	
 
@@ -1006,38 +997,43 @@ static void resid(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int
 	double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;		
 #endif
 
-	int i3, i2, i1;
-	double u1[M], u2[M];
+    double a0 = a[0];
+    double a2 = a[2];
+    double a3 = a[3];
+    double u1[n1], u2[n1];
+    
 
 	if(timeron){
 		#pragma omp master
 			timer_start(T_RESID);
 	}
-	#pragma omp for
-	for(i3 = 1; i3 < n3-1; i3++){
-		for(i2 = 1; i2 < n2-1; i2++){
-			for(i1 = 0; i1 < n1; i1++){
-				u1[i1] = u[i3][i2-1][i1] + u[i3][i2+1][i1]
-					+ u[i3-1][i2][i1] + u[i3+1][i2][i1];
-				u2[i1] = u[i3-1][i2-1][i1] + u[i3-1][i2+1][i1]
-					+ u[i3+1][i2-1][i1] + u[i3+1][i2+1][i1];
-			}
-			for(i1 = 1; i1 < n1-1; i1++){
-				r[i3][i2][i1] = v[i3][i2][i1]
-					- a[0] * u[i3][i2][i1]
-					/*
-					 * ---------------------------------------------------------------------
-					 * assume a(1) = 0 (enable 2 lines below if a(1) not= 0)
-					 * ---------------------------------------------------------------------
-					 * > - a(1) * ( u(i1-1,i2,i3) + u(i1+1,i2,i3)
-					 * > + u1(i1) )
-					 * ---------------------------------------------------------------------
-					 */
-					- a[2] * ( u2[i1] + u1[i1-1] + u1[i1+1] )
-					- a[3] * ( u2[i1-1] + u2[i1+1] );
-			}
-		}
-	}
+    /////////////////////////////////////////////////////////////////////////////////////////
+    // Enter data region: Transfer data to the GPU
+    #pragma omp target enter data map(alloc: r[:n3][:n2][:n1]) map(to: u[:n3][:n2][:n1], v[:n3][:n2][:n1], u1[:n1], u2[:n1], a0, a2, a3)
+    #pragma omp target teams distribute parallel for collapse(2) schedule(dynamic)
+    for(int i3 = 1; i3 < n3-1; i3++){
+        for(int i2 = 1; i2 < n2-1; i2++){  
+            
+            for(int i1 = 0; i1 < n1; i1++){
+                u1[i1] = u[i3][i2-1][i1] + u[i3][i2+1][i1]
+                       + u[i3-1][i2][i1] + u[i3+1][i2][i1];
+                u2[i1] = u[i3-1][i2-1][i1] + u[i3-1][i2+1][i1]
+                       + u[i3+1][i2-1][i1] + u[i3+1][i2+1][i1];
+            }
+    
+            
+            for(int i1 = 1; i1 < n1-1; i1++){
+                r[i3][i2][i1] = v[i3][i2][i1]
+                              - a0 * u[i3][i2][i1]
+                              - a2 * (u2[i1] + u1[i1-1] + u1[i1+1])
+                              - a3 * (u2[i1-1] + u2[i1+1]);
+            }
+        }
+    }
+    // Exit data region: Transfer the result back to the CPU and release GPU memory
+    #pragma omp target exit data map(from: r[:n3][:n2][:n1]) map(delete: u[:n3][:n2][:n1], v[:n3][:n2][:n1], u1[:n1], u2[:n1], a0, a2, a3)
+    /////////////////////////////////////////////////////////////////////////////////////////
+
 	if(timeron){
 		#pragma omp master
 			timer_stop(T_RESID);
