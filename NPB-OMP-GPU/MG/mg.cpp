@@ -817,12 +817,16 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
 #endif
 
 	int i3, i2, i1;
-	double r1[M], r2[M];
+	
 
 	if(timeron){timer_start(T_PSINV);}
-	for(i3 = 1; i3 < n3-1; i3++){
-		for(i2 = 1; i2 < n2-1; i2++){
-			for(i1 = 0; i1 < n1; i1++){
+	#pragma omp target enter data map(to: u[:n3][:n2][:n1])
+	{
+	#pragma omp target teams distribute parallel for collapse(2) schedule(dynamic) map(to: r[:n3][:n2][:n1], c[:3])
+	for(int i3 = 1; i3 < n3-1; i3++){
+		for(int i2 = 1; i2 < n2-1; i2++){
+			double r1[M], r2[M];
+			for(int i1 = 0; i1 < n1; i1++){
 				r1[i1] = r[i3][i2-1][i1] + r[i3][i2+1][i1]
 					+ r[i3-1][i2][i1] + r[i3+1][i2][i1];
 				r2[i1] = r[i3-1][i2-1][i1] + r[i3-1][i2+1][i1]
@@ -844,6 +848,8 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
 			}
 		}
 	}
+	}
+	#pragma omp target exit data map(from: u[:n3][1:n2][1:n1])
 	if(timeron){timer_stop(T_PSINV);}
 
 	/*
