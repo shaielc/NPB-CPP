@@ -39,7 +39,7 @@ Authors of the C++ code:
 	Dalvan Griebler <dalvangriebler@gmail.com>
 	Gabriell Araujo <hexenoften@gmail.com>
  	Júnior Löff <loffjh@gmail.com>
-*/
+*/ 
 
 #include <cstdio>
 #include <cstdlib>
@@ -106,8 +106,6 @@ extern void c_print_results(char* name,
 		char* npbversion,
 		char* compiletime,
 		char* compilerversion,
-		char* libversion,
-		char* totalthreads,
 		char* cc,
 		char* clink,
 		char* c_lib,

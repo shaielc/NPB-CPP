@@ -35,7 +35,6 @@ Authors of the Fortran code:
 	P. Frederickson
 	A. Woo
 	M. Yarrow
-	H. Jin
 
 ------------------------------------------------------------------------------
 
@@ -46,18 +45,8 @@ Authors of the C++ code:
 	Dalvan Griebler <dalvangriebler@gmail.com>
 	Gabriell Araujo <hexenoften@gmail.com>
  	Júnior Löff <loffjh@gmail.com>
-
-------------------------------------------------------------------------------
-
-The OpenMP version is a parallel implementation of the serial C++ version
-OpenMP version: https://github.com/GMAP/NPB-CPP/tree/master/NPB-OMP
-
-Authors of the OpenMP code:
-	Júnior Löff <loffjh@gmail.com>
-	
 */
 
-#include "omp.h"
 #include "../common/npb-CPP.hpp"
 #include "npbparams.hpp"
 
@@ -276,34 +265,28 @@ int main(int argc, char *argv[]){
 	setup(&n1,&n2,&n3,k);
 
 	zero3(u,n1,n2,n3);
-
 	zran3(v,n1,n2,n3,nx[lt],ny[lt],k);
-	
+
 	norm2u3(v,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
 
-	printf("\n\n NAS Parallel Benchmarks 4.1 Parallel C++ version with OpenMP - MG Benchmark\n\n");
+	printf("\n\n NAS Parallel Benchmarks 4.1 Serial C++ version - MG Benchmark\n\n");
 	printf(" Size: %3dx%3dx%3d (class_npb %1c)\n", nx[lt], ny[lt], nz[lt], class_npb);
 	printf(" Iterations: %3d\n", nit);
-	
-	#pragma omp parallel
-	{
-		resid(u,v,r,n1,n2,n3,a,k);
 
-		norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
+	resid(u,v,r,n1,n2,n3,a,k);
+	norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
 
-		/*
-		 * ---------------------------------------------------------------------
-		 * one iteration for startup
-		 * ---------------------------------------------------------------------
-		 */
-		mg3P(u,v,r,a,c,n1,n2,n3,k);
-		resid(u,v,r,n1,n2,n3,a,k);
-	}
-	
+	/*
+	 * ---------------------------------------------------------------------
+	 * one iteration for startup
+	 * ---------------------------------------------------------------------
+	 */
+	mg3P(u,v,r,a,c,n1,n2,n3,k);
+	resid(u,v,r,n1,n2,n3,a,k);
+
 	setup(&n1,&n2,&n3,k);
 
 	zero3(u,n1,n2,n3);
-
 	zran3(v,n1,n2,n3,nx[lt],ny[lt],k);
 
 	timer_stop(T_INIT);
@@ -315,65 +298,23 @@ int main(int argc, char *argv[]){
 	}
 	timer_start(T_BENCH);
 
-	// Just testing GPU works
-    #pragma omp target enter data map(to: it)
-    {
-      int asdf = 0;
-    }
-    #pragma omp target exit data map(from: it)
+	if(timeron){timer_start(T_RESID2);}
+	resid(u,v,r,n1,n2,n3,a,k);
+	if(timeron){timer_stop(T_RESID2);}
+	norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
 
-	#pragma omp parallel firstprivate(nit) private(it)
-    {
-
-		if(timeron){
-			#pragma omp master
-				timer_start(T_RESID2);
-		}
-		
+	for(it = 1; it <= nit; it++){
+		if((it==1)||(it==nit)||((it%5)==0)){printf("  iter %3d\n",it);}
+		if(timeron){timer_start(T_MG3P);}
+		mg3P(u,v,r,a,c,n1,n2,n3,k);
+		if(timeron){timer_stop(T_MG3P);}
+		if(timeron){timer_start(T_RESID2);}
 		resid(u,v,r,n1,n2,n3,a,k);
-		
-		if(timeron){
-			#pragma omp master
-				timer_stop(T_RESID2);
-		}
-
-		norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
-
-		for(it = 1; it <= nit; it++){
-			if((it==1)||(it==nit)||((it%5)==0)){
-				#pragma omp master
-					printf("  iter %3d\n",it);
-			}
-			
-			if(timeron){
-				#pragma omp master
-					timer_start(T_MG3P);
-			}
-
-			mg3P(u,v,r,a,c,n1,n2,n3,k);
-
-			if(timeron){
-				#pragma omp master
-					timer_stop(T_MG3P);
-			}
-			if(timeron){
-				#pragma omp master
-					timer_start(T_RESID2);
-			}
-
-			resid(u,v,r,n1,n2,n3,a,k);
-
-			if(timeron){
-				#pragma omp master
-					timer_stop(T_RESID2);
-			}
-		}
-	
-		norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
-	} /* end parallel */
+		if(timeron){timer_stop(T_RESID2);}
+	}
+	norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
 
 	timer_stop(T_BENCH);
-
 	t = timer_read(T_BENCH);    	
 
 	verified = FALSE;
@@ -425,7 +366,6 @@ int main(int argc, char *argv[]){
 		mflops = 0.0;
 	}
 
-	setenv("OMP_NUM_THREADS","1",0);
 	c_print_results((char*)"MG",
 			class_npb,
 			nx[lt],
@@ -439,8 +379,6 @@ int main(int argc, char *argv[]){
 			(char*)NPBVERSION,
 			(char*)COMPILETIME,
 			(char*)COMPILERVERSION,
-			(char*)LIBVERSION,
-			std::getenv("OMP_NUM_THREADS"),
 			(char*)CS1,
 			(char*)CS2,
 			(char*)CS3,
@@ -542,36 +480,29 @@ static void comm3(void* pointer_u, int n1, int n2, int n3, int kk){
 #endif
 
 	int i1, i2, i3;
-	if(timeron){
-		#pragma omp master
-			timer_start(T_COMM3);
-	}
-	#pragma omp for
+	if(timeron){timer_start(T_COMM3);}
+	/* axis = 1 */
 	for(i3 = 1; i3 < n3-1; i3++){
-		/* axis = 1 */
 		for(i2 = 1; i2 < n2-1; i2++){
 			u[i3][i2][0] = u[i3][i2][n1-2];
 			u[i3][i2][n1-1] = u[i3][i2][1];			
 		}
-		/* axis = 2 */
+	}
+	/* axis = 2 */
+	for(i3 = 1; i3 < n3-1; i3++){
 		for(i1 = 0; i1 < n1; i1++){
 			u[i3][0][i1] = u[i3][n2-2][i1];
 			u[i3][n2-1][i1] = u[i3][1][i1];			
 		}
 	}
 	/* axis = 3 */
-	#pragma omp for
 	for(i2 = 0; i2 < n2; i2++){
 		for(i1 = 0; i1 < n1; i1++){
 			u[0][i2][i1] = u[n3-2][i2][i1];
 			u[n3-1][i2][i1] = u[1][i2][i1];			
 		}
 	}
-
-	if(timeron){
-		#pragma omp master
-			timer_stop(T_COMM3);
-	}
+	if(timeron){timer_stop(T_COMM3);}
 }
 
 /*
@@ -609,13 +540,8 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 	 */
 	double z1[M], z2[M], z3[M];
 
-	if(timeron){
-		#pragma omp master
-			timer_start(T_INTERP);
-	}
-
+	if(timeron){timer_start(T_INTERP);}
 	if(n1 != 3 && n2 != 3 && n3 != 3){
-		#pragma omp for
 		for(i3 = 0; i3 < mm3-1; i3++){
 			for(i2 = 0; i2 < mm2-1; i2++){
 				for(i1 = 0; i1 < mm1; i1++){
@@ -671,7 +597,6 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 			d3 = 1;
 			t3 = 0;
 		}
-		#pragma omp for
 		for(i3 = d3; i3 <= mm3-1; i3++){
 			for(i2 = d2; i2 <= mm2-1; i2++){
 				for(i1 = d1; i1 <= mm1-1; i1++){
@@ -699,7 +624,6 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 				}
 			}
 		}
-		#pragma omp for
 		for(i3 = 1; i3 <= mm3-1; i3++){
 			for(i2 = d2; i2 <= mm2-1; i2++){
 				for(i1 = d1; i1 <= mm1-1; i1++){
@@ -732,20 +656,15 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 			}
 		}
 	}
-	if(timeron){
-		#pragma omp master
-			timer_stop(T_INTERP);
+	if(timeron){timer_stop(T_INTERP);}
+
+	if(debug_vec[0] >= 1){
+		rep_nrm(z,mm1,mm2,mm3,(char*)"z: inter",k-1);
+		rep_nrm(u,n1,n2,n3,(char*)"u: inter",k);
 	}
-	#pragma omp single
-    {
-		if(debug_vec[0] >= 1){
-			rep_nrm(z,mm1,mm2,mm3,(char*)"z: inter",k-1);
-			rep_nrm(u,n1,n2,n3,(char*)"u: inter",k);
-		}
-		if(debug_vec[5] >= k){
-			showall(z,mm1,mm2,mm3);
-			showall(u,n1,n2,n3);
-		}
+	if(debug_vec[5] >= k){
+		showall(z,mm1,mm2,mm3);
+		showall(u,n1,n2,n3);
 	}
 }
 
@@ -822,43 +741,30 @@ static void norm2u3(void* pointer_r, int n1, int n2, int n3, double* rnm2, doubl
 		custom_cast r = reinterpret_cast<custom_cast>(pointer_r);
 #else
 		double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;
-#endif	
+#endif		
 
-	static double s, rnmu_local;
-	double a;
+	double s, a;
 	int i3, i2, i1;
 
 	double dn;
 
-	if(timeron){
-		#pragma omp master
-			timer_start(T_NORM2);
-	}
+	if(timeron){timer_start(T_NORM2);}
 	dn = 1.0*nx*ny*nz;
 
-	#pragma omp single
-	{
-		s = 0.0;
-		rnmu_local = 0.0;
-	}
-
-	#pragma omp for reduction(+:s,rnmu_local) 
+	s = 0.0;
+	*rnmu = 0.0;
 	for(i3 = 1; i3 < n3-1; i3++){
 		for(i2 = 1; i2 < n2-1; i2++){
 			for(i1 = 1; i1 < n1-1; i1++){
 				s = s + r[i3][i2][i1] * r[i3][i2][i1];
 				a = fabs(r[i3][i2][i1]);
-				if(a > rnmu_local){rnmu_local = a;}
+				if(a > *rnmu){*rnmu = a;}
 			}
 		}
 	}
 
-	*rnmu = rnmu_local;
 	*rnm2 = sqrt(s/dn);
-	if(timeron){
-		#pragma omp master
-			timer_stop(T_NORM2);
-	}
+	if(timeron){timer_stop(T_NORM2);}
 }
 
 /*
@@ -908,17 +814,12 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
 #else
 	double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;
 	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;	
-#endif		
+#endif
 
 	int i3, i2, i1;
 	double r1[M], r2[M];
 
-	if(timeron){
-		#pragma omp master
-			timer_start(T_PSINV);
-	}
-	
-	#pragma omp for
+	if(timeron){timer_start(T_PSINV);}
 	for(i3 = 1; i3 < n3-1; i3++){
 		for(i2 = 1; i2 < n2-1; i2++){
 			for(i1 = 0; i1 < n1; i1++){
@@ -943,10 +844,7 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
 			}
 		}
 	}
-	if(timeron){
-		#pragma omp master
-			timer_stop(T_PSINV);
-	}
+	if(timeron){timer_stop(T_PSINV);}
 
 	/*
 	 * --------------------------------------------------------------------
@@ -956,13 +854,11 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
 	comm3(u,n1,n2,n3,k);
 
 	if(debug_vec[0] >= 1){
-		#pragma omp single
-			rep_nrm(u,n1,n2,n3,(char*)"   psinv",k);
+		rep_nrm(u,n1,n2,n3,(char*)"   psinv",k);
 	}
 
 	if(debug_vec[3] >= k){
-		#pragma omp single
-			showall(u,n1,n2,n3);
+		showall(u,n1,n2,n3);
 	}
 }
 
@@ -973,9 +869,9 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
  */
 static void rep_nrm(void* pointer_u, int n1, int n2, int n3, char* title, int kk){
 	double rnm2, rnmu;
+
 	norm2u3(pointer_u,n1,n2,n3,&rnm2,&rnmu,nx[kk],ny[kk],nz[kk]);
-	#pragma omp master
-		printf(" Level%2d in %8s: norms =%21.14e%21.14e\n", kk, title, rnm2, rnmu);
+	printf(" Level%2d in %8s: norms =%21.14e%21.14e\n", kk, title, rnm2, rnmu);
 }
 
 /*
@@ -1007,16 +903,17 @@ static void resid(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int
 #endif
 
 	int i3, i2, i1;
-	double u1[M], u2[M];
+	
 
-	if(timeron){
-		#pragma omp master
-			timer_start(T_RESID);
-	}
-	#pragma omp for
-	for(i3 = 1; i3 < n3-1; i3++){
-		for(i2 = 1; i2 < n2-1; i2++){
-			for(i1 = 0; i1 < n1; i1++){
+	if(timeron){timer_start(T_RESID);}
+
+    #pragma omp target enter data map(to: r[:n3][1:n2][1:n1])
+  {
+    #pragma omp target teams distribute parallel for collapse(2) schedule(dynamic) map(to: u[:n3][:n2][:n1], v[:n3][:n2][:n1], a[:4])
+	for(int i3 = 1; i3 < n3-1; i3++){
+		for(int i2 = 1; i2 < n2-1; i2++){
+          double u1[M], u2[M];
+			for(int i1 = 0; i1 < n1; i1++){
 				u1[i1] = u[i3][i2-1][i1] + u[i3][i2+1][i1]
 					+ u[i3-1][i2][i1] + u[i3+1][i2][i1];
 				u2[i1] = u[i3-1][i2-1][i1] + u[i3-1][i2+1][i1]
@@ -1038,10 +935,9 @@ static void resid(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int
 			}
 		}
 	}
-	if(timeron){
-		#pragma omp master
-			timer_stop(T_RESID);
-	}
+  }
+      #pragma omp target exit data map(from: r[:n3][1:n2][1:n1])
+	if(timeron){timer_stop(T_RESID);}
 
 	/*
 	 * --------------------------------------------------------------------
@@ -1051,13 +947,11 @@ static void resid(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int
 	comm3(r,n1,n2,n3,k);
 
 	if(debug_vec[0] >= 1){
-		#pragma omp single
-			rep_nrm(r,n1,n2,n3,(char*)"   resid",k);
+		rep_nrm(r,n1,n2,n3,(char*)"   resid",k);
 	}
 
 	if(debug_vec[2] >= k){
-		#pragma omp single
-			showall(r,n1,n2,n3);
+		showall(r,n1,n2,n3);
 	}
 }
 
@@ -1081,16 +975,13 @@ static void rprj3(void* pointer_r, int m1k, int m2k, int m3k, void* pointer_s, i
 #else
 	double (*r)[m2k][m1k] = (double (*)[m2k][m1k])pointer_r;
 	double (*s)[m2j][m1j] = (double (*)[m2j][m1j])pointer_s;		
-#endif	
+#endif		
 
 	int j3, j2, j1, i3, i2, i1, d1, d2, d3, j;
 
 	double x1[M], y1[M], x2, y2;
 
-	if(timeron){
-		#pragma omp master
-			timer_start(T_RPRJ3);
-	}
+	if(timeron){timer_start(T_RPRJ3);}
 	if(m1k == 3){
 		d1 = 2;
 	}else{
@@ -1106,8 +997,6 @@ static void rprj3(void* pointer_r, int m1k, int m2k, int m3k, void* pointer_s, i
 	}else{
 		d3 = 1;
 	}
-
-	#pragma omp for
 	for(j3 = 1; j3 < m3j-1; j3++){
 		i3 = 2*j3-d3;		
 		for(j2 = 1; j2 < m2j-1; j2++){
@@ -1133,22 +1022,17 @@ static void rprj3(void* pointer_r, int m1k, int m2k, int m3k, void* pointer_s, i
 			}
 		}
 	}
-	if(timeron){
-		#pragma omp master
-			timer_stop(T_RPRJ3);
-	}
+	if(timeron){timer_stop(T_RPRJ3);}
 
 	j=k-1;
 	comm3(s,m1j,m2j,m3j,j);
 
 	if(debug_vec[0] >= 1){
-		#pragma omp single
-			rep_nrm(s,m1j,m2j,m3j,(char*)"   rprj3",k-1);	
+		rep_nrm(s,m1j,m2j,m3j,(char*)"   rprj3",k-1);	
 	}
 
 	if(debug_vec[4] >= k){
-		#pragma omp single
-			showall(s,m1j,m2j,m3j);
+		showall(s,m1j,m2j,m3j);
 	}
 }
 
@@ -1212,7 +1096,7 @@ static void showall(void* pointer_z, int n1, int n2, int n3){
 	custom_cast z = reinterpret_cast<custom_cast>(pointer_z);	
 #else
 	double (*z)[n2][n1] = (double (*)[n2][n1])pointer_z;	
-#endif
+#endif	
 
 	int i1,i2,i3;
 	int m1, m2, m3;
@@ -1240,11 +1124,9 @@ static void zero3(void* pointer_z, int n1, int n2, int n3){
 		custom_cast z = reinterpret_cast<custom_cast>(pointer_z);
 #else
 		double (*z)[n2][n1] = (double (*)[n2][n1])pointer_z;
-#endif
+#endif	
 
 	int i1, i2, i3;
-
-    #pragma omp for  
 	for(i3 = 0;i3 < n3; i3++){
 		for(i2 = 0; i2 < n2; i2++){
 			for(i1 = 0; i1 < n1; i1++){
@@ -1267,7 +1149,7 @@ static void zran3(void* pointer_z, int n1, int n2, int n3, int nx, int ny, int k
 	custom_cast z = reinterpret_cast<custom_cast>(pointer_z);
 #else
 	double (*z)[n2][n1] = (double (*)[n2][n1])pointer_z;
-#endif
+#endif	
 
 	int i0, m0, m1;
 
@@ -1281,8 +1163,7 @@ static void zran3(void* pointer_z, int n1, int n2, int n3, int nx, int ny, int k
 	a1 = power(A, nx);
 	a2 = power(A, nx*ny);
 
-	#pragma omp parallel
-		zero3(z, n1, n2, n3);
+	zero3(z, n1, n2, n3);
 
 	i = is1-2+nx*(is2-2+ny*(is3-2));
 
@@ -1390,6 +1271,5 @@ static void zran3(void* pointer_z, int n1, int n2, int n3, int nx, int ny, int k
 	for(i = MM-1; i >= m1; i--){
 		z[jg[1][i][3]][jg[1][i][2]][jg[1][i][1]] = +1.0;
 	}
-	#pragma omp parallel 
 	comm3(z, n1, n2, n3, k);
 }
