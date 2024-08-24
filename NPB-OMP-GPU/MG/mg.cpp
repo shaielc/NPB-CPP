@@ -743,7 +743,7 @@ static void norm2u3(void* pointer_r, int n1, int n2, int n3, double* rnm2, doubl
 		double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;
 #endif		
 
-	double s, a;
+	double s, a, inf_norm;
 	int i3, i2, i1;
 
 	double dn;
@@ -753,11 +753,14 @@ static void norm2u3(void* pointer_r, int n1, int n2, int n3, double* rnm2, doubl
 
 	s = 0.0;
 	*rnmu = 0.0;
+	#pragma omp target map(tofrom: s, inf_norm) map(to: r[:n3][:n2][:n1])
+	#pragma omp teams distribute parallel for collapse(3) reduction(+: s) reduction(max: inf_norm) schedule(dynamic) 
 	for(i3 = 1; i3 < n3-1; i3++){
 		for(i2 = 1; i2 < n2-1; i2++){
 			for(i1 = 1; i1 < n1-1; i1++){
 				s = s + r[i3][i2][i1] * r[i3][i2][i1];
 				a = fabs(r[i3][i2][i1]);
+				inf_norm = inf_norm < a? a: inf_norm;
 				if(a > *rnmu){*rnmu = a;}
 			}
 		}
