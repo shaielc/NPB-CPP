@@ -547,12 +547,14 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 	 * parameter( m=535 )
 	 * --------------------------------------------------------------------
 	 */
-	double z1[M], z2[M], z3[M];
+	
 
 	if(timeron){timer_start(T_INTERP);}
 	if(n1 != 3 && n2 != 3 && n3 != 3){
+		#pragma omp target teams distribute parallel for collapse(2) map(tofrom: u[:n3][:n2][:n1], z[:n3][:n2][:n1])
 		for(i3 = 0; i3 < mm3-1; i3++){
 			for(i2 = 0; i2 < mm2-1; i2++){
+				double z1[M], z2[M], z3[M];
 				for(i1 = 0; i1 < mm1; i1++){
 					z1[i1] = z[i3][i2+1][i1] + z[i3][i2][i1];
 					z2[i1] = z[i3+1][i2][i1] + z[i3][i2][i1];
@@ -606,6 +608,7 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 			d3 = 1;
 			t3 = 0;
 		}
+		#pragma omp target teams distribute parallel for map(tofrom: u[:n3][:n2][:n1], z[:n3][:n2][:n1])
 		for(i3 = d3; i3 <= mm3-1; i3++){
 			for(i2 = d2; i2 <= mm2-1; i2++){
 				for(i1 = d1; i1 <= mm1-1; i1++){
@@ -633,6 +636,7 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 				}
 			}
 		}
+        #pragma omp target teams distribute parallel for map(tofrom: u[:n3][:n2][:n1], z[:n3][:n2][:n1])
 		for(i3 = 1; i3 <= mm3-1; i3++){
 			for(i2 = d2; i2 <= mm2-1; i2++){
 				for(i1 = d1; i1 <= mm1-1; i1++){
@@ -664,7 +668,7 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 				}
 			}
 		}
-	}
+	} /* end of else*/
 	if(timeron){timer_stop(T_INTERP);}
 
 	if(debug_vec[0] >= 1){
