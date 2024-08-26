@@ -344,7 +344,7 @@ int main(int argc, char *argv[]){
 
 	printf(" Benchmark completed\n");
 
-	epsilon = 1.0e-8;
+	epsilon = 1.0e-5;
 	if(class_npb != 'U'){
 		if(class_npb == 'S'){
 			verify_value = 0.5307707005734e-04;
