@@ -70,7 +70,7 @@ Authors of the C++ code:
 #define T_NORM2 8
 #define T_COMM3 9
 #define T_LAST 10
-#define TILE_SIZE 16
+#define TILE_SIZE 4
 
 /* global variables */
 #if defined(DO_NOT_ALLOCATE_ARRAYS_WITH_DYNAMIC_MEMORY_AND_AS_SINGLE_DIMENSION)
