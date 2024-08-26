@@ -49,6 +49,7 @@ Authors of the C++ code:
 
 #include "../common/npb-CPP.hpp"
 #include "npbparams.hpp"
+#include <omp.h>
 
 #define NM (2+(1<<LM)) /* actual dimension including ghost cells for communications */
 #define NV (ONE*(2+(1<<NDIM1))*(2+(1<<NDIM2))*(2+(1<<NDIM3))) /* size of rhs array */
@@ -114,6 +115,17 @@ static void setup(int* n1, int* n2, int* n3, int k);
 static void showall(void* pointer_z, int n1, int n2, int n3);
 static void zero3(void* pointer_z, int n1, int n2, int n3);
 static void zran3(void* pointer_z, int n1, int n2, int n3, int nx, int ny, int k);
+
+
+
+static void norm2u3_gpu(void* pointer_r, int n1, int n2, int n3, double* rnm2, double* rnmu, int nx, int ny, int nz);
+static void rprj3_gpu(void* pointer_r, int m1k, int m2k, int m3k, void* pointer_s, int m1j, int m2j, int m3j, int k);
+static void comm3_gpu(void* pointer_u, int n1, int n2, int n3, int kk);
+static void psinv_gpu(void* pointer_r, void* pointer_u, int n1, int n2, int n3, double c[4], int k);
+static void zero3_gpu(void* pointer_z, int n1, int n2, int n3);
+static void mg3P_gpu(double u[], double v[], double r[], double a[4], double c[4], int n1, int n2, int n3, int k);
+static void resid_gpu(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int n2, int n3, double a[4], int k);
+static void interp_gpu(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, int n1, int n2, int n3, int k);
 
 /* mg */
 int main(int argc, char *argv[]){
@@ -303,15 +315,19 @@ int main(int argc, char *argv[]){
 	if(timeron){timer_stop(T_RESID2);}
 	norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
 
+	#pragma omp target enter data map(to: u[:NR], v[:NV], r[:NR], c[:4], a[:4])
+	{
 	for(it = 1; it <= nit; it++){
 		if((it==1)||(it==nit)||((it%5)==0)){printf("  iter %3d\n",it);}
 		if(timeron){timer_start(T_MG3P);}
-		mg3P(u,v,r,a,c,n1,n2,n3,k);
+		mg3P_gpu(u,v,r,a,c,n1,n2,n3,k);
 		if(timeron){timer_stop(T_MG3P);}
 		if(timeron){timer_start(T_RESID2);}
-		resid(u,v,r,n1,n2,n3,a,k);
+		resid_gpu(u,v,r,n1,n2,n3,a,k);
 		if(timeron){timer_stop(T_RESID2);}
 	}
+	}
+	#pragma omp target exit data map(from: u[:NR], v[:NV], r[:NR])
 	norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
 
 	timer_stop(T_BENCH);
@@ -481,27 +497,34 @@ static void comm3(void* pointer_u, int n1, int n2, int n3, int kk){
 
 	int i1, i2, i3;
 	if(timeron){timer_start(T_COMM3);}
+	
 	/* axis = 1 */
+	// #pragma omp target teams distribute parallel for simd collapse(2)
 	for(i3 = 1; i3 < n3-1; i3++){
 		for(i2 = 1; i2 < n2-1; i2++){
 			u[i3][i2][0] = u[i3][i2][n1-2];
 			u[i3][i2][n1-1] = u[i3][i2][1];			
 		}
 	}
+
 	/* axis = 2 */
+	// #pragma omp target teams distribute parallel for simd collapse(2)
 	for(i3 = 1; i3 < n3-1; i3++){
 		for(i1 = 0; i1 < n1; i1++){
 			u[i3][0][i1] = u[i3][n2-2][i1];
 			u[i3][n2-1][i1] = u[i3][1][i1];			
 		}
 	}
+
 	/* axis = 3 */
+	// #pragma omp target teams distribute parallel for simd collapse(2)
 	for(i2 = 0; i2 < n2; i2++){
 		for(i1 = 0; i1 < n1; i1++){
 			u[0][i2][i1] = u[n3-2][i2][i1];
 			u[n3-1][i2][i1] = u[1][i2][i1];			
 		}
 	}
+
 	if(timeron){timer_stop(T_COMM3);}
 }
 
@@ -538,12 +561,14 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 	 * parameter( m=535 )
 	 * --------------------------------------------------------------------
 	 */
-	double z1[M], z2[M], z3[M];
+	
 
 	if(timeron){timer_start(T_INTERP);}
 	if(n1 != 3 && n2 != 3 && n3 != 3){
+		// #pragma omp target teams distribute parallel for simd collapse(2) map(tofrom: u[:n3][:n2][:n1], z[:n3][:n2][:n1])
 		for(i3 = 0; i3 < mm3-1; i3++){
 			for(i2 = 0; i2 < mm2-1; i2++){
+				double z1[M], z2[M], z3[M];
 				for(i1 = 0; i1 < mm1; i1++){
 					z1[i1] = z[i3][i2+1][i1] + z[i3][i2][i1];
 					z2[i1] = z[i3+1][i2][i1] + z[i3][i2][i1];
@@ -597,6 +622,7 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 			d3 = 1;
 			t3 = 0;
 		}
+		// #pragma omp target teams distribute parallel for simd map(tofrom: u[:n3][:n2][:n1], z[:n3][:n2][:n1])
 		for(i3 = d3; i3 <= mm3-1; i3++){
 			for(i2 = d2; i2 <= mm2-1; i2++){
 				for(i1 = d1; i1 <= mm1-1; i1++){
@@ -624,6 +650,7 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 				}
 			}
 		}
+        // #pragma omp target teams distribute parallel for simd map(tofrom: u[:n3][:n2][:n1], z[:n3][:n2][:n1])
 		for(i3 = 1; i3 <= mm3-1; i3++){
 			for(i2 = d2; i2 <= mm2-1; i2++){
 				for(i1 = d1; i1 <= mm1-1; i1++){
@@ -655,7 +682,7 @@ static void interp(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, 
 				}
 			}
 		}
-	}
+	} /* end of else*/
 	if(timeron){timer_stop(T_INTERP);}
 
 	if(debug_vec[0] >= 1){
@@ -736,14 +763,16 @@ static void mg3P(double u[], double v[], double r[], double a[4], double c[4], i
  * ---------------------------------------------------------------------
  */
 static void norm2u3(void* pointer_r, int n1, int n2, int n3, double* rnm2, double* rnmu, int nx, int ny, int nz){
-#ifdef __clang__
-		using custom_cast = double (*)[n2][n1];
-		custom_cast r = reinterpret_cast<custom_cast>(pointer_r);
-#else
-		double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;
-#endif		
+// #ifdef __clang__
+// 		using custom_cast = double (*)[n2][n1];
+// 		custom_cast r = reinterpret_cast<custom_cast>(pointer_r);
+// #else
+// 		double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;
+// #endif
 
-	double s, a;
+	double *r = (double*)pointer_r;
+
+	double s = 0.0, a, inf_norm = 0.0;
 	int i3, i2, i1;
 
 	double dn;
@@ -753,12 +782,13 @@ static void norm2u3(void* pointer_r, int n1, int n2, int n3, double* rnm2, doubl
 
 	s = 0.0;
 	*rnmu = 0.0;
-	for(i3 = 1; i3 < n3-1; i3++){
-		for(i2 = 1; i2 < n2-1; i2++){
-			for(i1 = 1; i1 < n1-1; i1++){
-				s = s + r[i3][i2][i1] * r[i3][i2][i1];
-				a = fabs(r[i3][i2][i1]);
-				if(a > *rnmu){*rnmu = a;}
+
+	for(int i3 = 1; i3 < n3-1; i3++){
+		for(int i2 = 1; i2 < n2-1; i2++){
+			for(int i1 = 1; i1 < n1-1; i1++){
+				s = s + r[i3*n2*n1 + i2 *n1 +i1] * r[i3*n2*n1 + i2 *n1 +i1];
+				a = fabs(r[i3*n2*n1 + i2 *n1 +i1]);
+				inf_norm = inf_norm < a? a: inf_norm;
 			}
 		}
 	}
@@ -817,12 +847,16 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
 #endif
 
 	int i3, i2, i1;
-	double r1[M], r2[M];
+	
 
 	if(timeron){timer_start(T_PSINV);}
-	for(i3 = 1; i3 < n3-1; i3++){
-		for(i2 = 1; i2 < n2-1; i2++){
-			for(i1 = 0; i1 < n1; i1++){
+	// #pragma omp target enter data map(to: u[:n3][:n2][:n1])
+	{
+	// #pragma omp target teams distribute parallel for simd collapse(2) schedule(dynamic) map(to: r[:n3][:n2][:n1], c[:3])
+	for(int i3 = 1; i3 < n3-1; i3++){
+		for(int i2 = 1; i2 < n2-1; i2++){
+			double r1[M], r2[M];
+			for(int i1 = 0; i1 < n1; i1++){
 				r1[i1] = r[i3][i2-1][i1] + r[i3][i2+1][i1]
 					+ r[i3-1][i2][i1] + r[i3+1][i2][i1];
 				r2[i1] = r[i3-1][i2-1][i1] + r[i3-1][i2+1][i1]
@@ -844,6 +878,8 @@ static void psinv(void* pointer_r, void* pointer_u, int n1, int n2, int n3, doub
 			}
 		}
 	}
+	}
+	// #pragma omp target exit data map(from: u[:n3][1:n2][1:n1])
 	if(timeron){timer_stop(T_PSINV);}
 
 	/*
@@ -907,9 +943,9 @@ static void resid(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int
 
 	if(timeron){timer_start(T_RESID);}
 
-    #pragma omp target enter data map(to: r[:n3][1:n2][1:n1])
+    // #pragma omp target enter data map(to: r[:n3][:n2][:n1])
   {
-    #pragma omp target teams distribute parallel for collapse(2) schedule(dynamic) map(to: u[:n3][:n2][:n1], v[:n3][:n2][:n1], a[:4])
+    // #pragma omp target teams distribute parallel for simd collapse(2) schedule(dynamic) map(to: u[:n3][:n2][:n1], v[:n3][:n2][:n1], a[:4])
 	for(int i3 = 1; i3 < n3-1; i3++){
 		for(int i2 = 1; i2 < n2-1; i2++){
           double u1[M], u2[M];
@@ -936,7 +972,7 @@ static void resid(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int
 		}
 	}
   }
-      #pragma omp target exit data map(from: r[:n3][1:n2][1:n1])
+      // #pragma omp target exit data map(from: r[:n3][:n2][:n1])
 	if(timeron){timer_stop(T_RESID);}
 
 	/*
@@ -1272,4 +1308,611 @@ static void zran3(void* pointer_z, int n1, int n2, int n3, int nx, int ny, int k
 		z[jg[1][i][3]][jg[1][i][2]][jg[1][i][1]] = +1.0;
 	}
 	comm3(z, n1, n2, n3, k);
+}
+
+/*
+ * ---------------------------------------------------------------------
+ * norm2u3 evaluates approximations to the l2 norm and the
+ * uniform (or l-infinity or chebyshev) norm, under the
+ * assumption that the boundaries are periodic or zero. add the
+ * boundaries in with half weight (quarter weight on the edges
+ * and eighth weight at the corners) for inhomogeneous boundaries.
+ * ---------------------------------------------------------------------
+ */
+static void norm2u3_gpu(void* pointer_r, int n1, int n2, int n3, double* rnm2, double* rnmu, int nx, int ny, int nz){
+// #ifdef __clang__
+// 		using custom_cast = double (*)[n2][n1];
+// 		custom_cast r = reinterpret_cast<custom_cast>(pointer_r);
+// #else
+// 		double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;
+// #endif
+
+	double *r = (double*)pointer_r;
+
+	double s = 0.0, a, inf_norm = 0.0;
+	int i3, i2, i1;
+
+	double dn;
+
+	if(timeron){timer_start(T_NORM2);}
+	dn = 1.0*nx*ny*nz;
+
+	s = 0.0;
+	*rnmu = 0.0;
+
+	#pragma omp target
+	#pragma omp teams distribute parallel for simd collapse(3) reduction(+: s) reduction(max: inf_norm) schedule(dynamic) 
+	for(int i3 = 1; i3 < n3-1; i3++){
+		for(int i2 = 1; i2 < n2-1; i2++){
+			for(int i1 = 1; i1 < n1-1; i1++){
+				s = s + r[i3*n2*n1 + i2 *n1 +i1] * r[i3*n2*n1 + i2 *n1 +i1];
+				a = fabs(r[i3*n2*n1 + i2 *n1 +i1]);
+				inf_norm = inf_norm < a? a: inf_norm;
+			}
+		}
+	}
+
+	*rnm2 = sqrt(s/dn);
+	if(timeron){timer_stop(T_NORM2);}
+}
+
+static void rprj3_gpu(void* pointer_r, int m1k, int m2k, int m3k, void* pointer_s, int m1j, int m2j, int m3j, int k){
+#ifdef __clang__
+	using custom_cast = double (*)[m2k][m1k];
+	custom_cast r = reinterpret_cast<custom_cast>(pointer_r);
+	using custom_cast2 = double (*)[m2j][m1j];
+	custom_cast2 s = reinterpret_cast<custom_cast2>(pointer_s);
+#else
+	double (*r)[m2k][m1k] = (double (*)[m2k][m1k])pointer_r;
+	double (*s)[m2j][m1j] = (double (*)[m2j][m1j])pointer_s;		
+#endif		
+
+	int j3, j2, j1, i3, i2, i1, d1, d2, d3, j;
+
+	
+
+	if(timeron){timer_start(T_RPRJ3);}
+	if(m1k == 3){
+		d1 = 2;
+	}else{
+		d1 = 1;
+	}
+	if(m2k == 3){
+		d2 = 2;
+	}else{
+		d2 = 1;
+	}
+	if(m3k == 3){
+		d3 = 2;
+	}else{
+		d3 = 1;
+	}
+	#pragma omp target
+	#pragma omp teams distribute parallel for simd
+	for(int j3 = 1; j3 < m3j-1; j3++){
+		i3 = 2*j3-d3;		
+		for(int j2 = 1; j2 < m2j-1; j2++){
+			
+			i2 = 2*j2-d2;
+			
+			for (int j1 = 1; j1 < m1j - 1; j1++) {
+				int i1 = 2 * j1 - d1;
+				
+				// Calculate x1[i1] and y1[i1] for the current i1
+				double x1_curr = r[i3 + 1][i2][i1] + r[i3 + 1][i2 + 2][i1]
+							+ r[i3][i2 + 1][i1] + r[i3 + 2][i2 + 1][i1];
+				double y1_curr = r[i3][i2][i1] + r[i3 + 2][i2][i1]
+							+ r[i3][i2 + 2][i1] + r[i3 + 2][i2 + 2][i1];
+				
+				// Calculate y2 and x2 based on i1 + 1
+				double y2 = r[i3][i2][i1 + 1] + r[i3 + 2][i2][i1 + 1]
+						+ r[i3][i2 + 2][i1 + 1] + r[i3 + 2][i2 + 2][i1 + 1];
+				double x2 = r[i3 + 1][i2][i1 + 1] + r[i3 + 1][i2 + 2][i1 + 1]
+						+ r[i3][i2 + 1][i1 + 1] + r[i3 + 2][i2 + 1][i1 + 1];
+
+				// Calculate the next x1[i1 + 2] and y1[i1 + 2] for the next iteration
+				int i1_next = i1 + 2;
+				double x1_next = r[i3 + 1][i2][i1_next] + r[i3 + 1][i2 + 2][i1_next]
+							+ r[i3][i2 + 1][i1_next] + r[i3 + 2][i2 + 1][i1_next];
+				double y1_next = r[i3][i2][i1_next] + r[i3 + 2][i2][i1_next]
+							+ r[i3][i2 + 2][i1_next] + r[i3 + 2][i2 + 2][i1_next];
+
+				// Calculate s[j3][j2][j1] using the current and next x1 and y1 values
+				s[j3][j2][j1] = 0.5 * r[i3 + 1][i2 + 1][i1 + 1]
+							+ 0.25 * (r[i3 + 1][i2 + 1][i1] + r[i3 + 1][i2 + 1][i1 + 2] + x2)
+							+ 0.125 * (x1_curr + x1_next + y2)
+							+ 0.0625 * (y1_curr + y1_next);
+			}
+
+		}
+	}
+	if(timeron){timer_stop(T_RPRJ3);}
+
+	j=k-1;
+	comm3_gpu(s,m1j,m2j,m3j,j);
+
+	if(debug_vec[0] >= 1){
+		rep_nrm(s,m1j,m2j,m3j,(char*)"   rprj3",k-1);	
+	}
+
+	if(debug_vec[4] >= k){
+		showall(s,m1j,m2j,m3j);
+	}
+}
+
+/*
+ * ---------------------------------------------------------------------
+ * comm3 organizes the communication on all borders 
+ * ---------------------------------------------------------------------
+ */
+static void comm3_gpu(void* pointer_u, int n1, int n2, int n3, int kk){
+#ifdef __clang__
+		using custom_cast = double (*)[n2][n1];
+		custom_cast u = reinterpret_cast<custom_cast>(pointer_u);
+#else
+		double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
+#endif
+
+
+	int i1, i2, i3;
+	if(timeron){timer_start(T_COMM3);}
+	
+	
+	#pragma omp target teams distribute parallel for simd collapse(1) nowait
+	for( i3 = 1; i3 < n3-1; i3++){
+		/* axis = 1 */
+		for( i2 = 1; i2 < n2-1; i2++){
+			u[i3][i2][0] = u[i3][i2][n1-2];
+			u[i3][i2][n1-1] = u[i3][i2][1];			
+		}
+		/* axis = 2 */
+		for( i1 = 0; i1 < n1; i1++){
+			u[i3][0][i1] = u[i3][n2-2][i1];
+			u[i3][n2-1][i1] = u[i3][1][i1];			
+		}
+	}
+
+	/* axis = 3 */
+	#pragma omp target teams distribute parallel for simd collapse(2) nowait
+	for( i2 = 0; i2 < n2; i2++){
+		for( i1 = 0; i1 < n1; i1++){
+			u[0][i2][i1] = u[n3-2][i2][i1];
+			u[n3-1][i2][i1] = u[1][i2][i1];			
+		}
+	}
+	
+	#pragma omp taskwait
+
+	if(timeron){timer_stop(T_COMM3);}
+}
+
+static void psinv_gpu(void* pointer_r, void* pointer_u, int n1, int n2, int n3, double c[4], int k){
+#ifdef __clang__
+	using custom_cast = double (*)[n2][n1];
+	custom_cast r = reinterpret_cast<custom_cast>(pointer_r);	
+	using custom_cast2 = double (*)[n2][n1];
+	custom_cast2 u = reinterpret_cast<custom_cast2>(pointer_u);
+#else
+	double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;
+	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;	
+#endif
+
+	int i3, i2, i1;
+	
+
+	if(timeron){timer_start(T_PSINV);}
+	int T3=32, T2=32, T1=32;
+	#pragma omp target
+	#pragma omp teams distribute parallel for collapse(2) schedule(dynamic)
+	for(int t3 = 1; t3 < n3-1; t3 += T3) {
+		for(int t2 = 1; t2 < n2-1; t2 += T2) {
+			for(int t1 = 1; t1 < n1-1; t1 += T1) {
+				for(int i3 = t3; i3 < min(t3 + T3, n3-1); i3++) {
+					for(int i2 = t2; i2 < min(t2 + T2, n2-1); i2++) {
+						#pragma omp simd
+						for(int i1 = t1; i1 < min(t1 + T1, n1-1); i1++) {
+							double r1_prev, r1_current, r1_next;
+							double r2_current, r2_next;
+							r1_prev = r[i3][i2-1][i1-1] + r[i3][i2+1][i1-1]
+									+ r[i3-1][i2][i1-1] + r[i3+1][i2][i1-1];
+
+							r1_current = r[i3][i2-1][i1] + r[i3][i2+1][i1]
+									+ r[i3-1][i2][i1] + r[i3+1][i2][i1];
+							r2_current = r[i3-1][i2-1][i1] + r[i3-1][i2+1][i1]
+									+ r[i3+1][i2-1][i1] + r[i3+1][i2+1][i1];
+							
+							r1_next = r[i3][i2-1][i1+1] + r[i3][i2+1][i1+1]
+									+ r[i3-1][i2][i1+1] + r[i3+1][i2][i1+1];
+							r2_next = r[i3-1][i2-1][i1+1] + r[i3-1][i2+1][i1+1]
+									+ r[i3+1][i2-1][i1+1] + r[i3+1][i2+1][i1+1];
+							
+							u[i3][i2][i1] = u[i3][i2][i1]
+									+ c[0] * r[i3][i2][i1]
+									+ c[1] * ( r[i3][i2][i1-1] + r[i3][i2][i1+1]
+											+ r1_current )
+									+ c[2] * ( r2_current + r1_prev + r1_next );
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if(timeron){timer_stop(T_PSINV);}
+
+	/*
+	 * --------------------------------------------------------------------
+	 * exchange boundary points
+	 * --------------------------------------------------------------------
+	 */
+	comm3_gpu(u,n1,n2,n3,k);
+
+	if(debug_vec[0] >= 1){
+		rep_nrm(u,n1,n2,n3,(char*)"   psinv",k);
+	}
+
+	if(debug_vec[3] >= k){
+		showall(u,n1,n2,n3);
+	}
+}
+
+static void interp_gpu_A(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, int n1, int n2, int n3, int k){
+	#ifdef __clang__
+	using custom_cast = double (*)[mm2][mm1];
+	custom_cast z = reinterpret_cast<custom_cast>(pointer_z);
+	using custom_cast2 = double (*)[n2][n1];
+	custom_cast2 u = reinterpret_cast<custom_cast2>(pointer_u);
+#else
+	double (*z)[mm2][mm1] = (double (*)[mm2][mm1])pointer_z;
+	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
+#endif
+	int i3, i2, i1;
+	int T3=32, T2=32, T1=32;
+	#pragma omp target
+	#pragma omp teams distribute parallel for collapse(3)
+	for(int t3 = 0; t3 < mm3-1; t3 += T3) {
+		for(int t2 = 0; t2 < mm2-1; t2 += T2) {
+			for(int t1 = 0; t1 < mm1-1; t1 += T1) {
+				for(int i3 = t3; i3 < min(t3 + T3, mm3-1); i3++) {
+					for(int i2 = t2; i2 < min(t2 + T2, mm2-1); i2++) {
+					
+						#pragma omp simd
+						for(int i1 = t1; i1 < min(t1 + T1, mm1-1); i1++) {
+							// Calculate z1, z2, z3 for the current i1
+							double z1_curr = z[i3][i2 + 1][i1] + z[i3][i2][i1];
+							double z2_curr = z[i3 + 1][i2][i1] + z[i3][i2][i1];
+							double z3_curr = z[i3 + 1][i2 + 1][i1] + z[i3 + 1][i2][i1] + z1_curr;
+
+							// Calculate z1, z2, z3 for the next i1 (i1 + 1)
+							double z1_next = z[i3][i2 + 1][i1 + 1] + z[i3][i2][i1 + 1];
+							double z2_next = z[i3 + 1][i2][i1 + 1] + z[i3][i2][i1 + 1];
+							double z3_next = z[i3 + 1][i2 + 1][i1 + 1] + z[i3 + 1][i2][i1 + 1] + z1_next;
+
+							// Update u values for current i1
+							u[2 * i3][2 * i2][2 * i1] += z[i3][i2][i1];
+							u[2 * i3][2 * i2][2 * i1 + 1] += 0.5 * (z[i3][i2][i1 + 1] + z[i3][i2][i1]);
+							u[2 * i3][2 * i2 + 1][2 * i1] += 0.5 * z1_curr;
+							u[2 * i3][2 * i2 + 1][2 * i1 + 1] += 0.25 * (z1_curr + z1_next);
+							u[2 * i3 + 1][2 * i2][2 * i1] += 0.5 * z2_curr;
+							u[2 * i3 + 1][2 * i2][2 * i1 + 1] += 0.25 * (z2_curr + z2_next);
+							u[2 * i3 + 1][2 * i2 + 1][2 * i1] += 0.25 * z3_curr;
+							u[2 * i3 + 1][2 * i2 + 1][2 * i1 + 1] += 0.125 * (z3_curr + z3_next);
+						}
+					}
+				}
+			}
+		}
+	}
+
+}
+static void interp_gpu_B(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, int n1, int n2, int n3, int k){
+	#ifdef __clang__
+	using custom_cast = double (*)[mm2][mm1];
+	custom_cast z = reinterpret_cast<custom_cast>(pointer_z);
+	using custom_cast2 = double (*)[n2][n1];
+	custom_cast2 u = reinterpret_cast<custom_cast2>(pointer_u);
+#else
+	double (*z)[mm2][mm1] = (double (*)[mm2][mm1])pointer_z;
+	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
+#endif
+	int i3, i2, i1, d1,d2,d3, t1,t2,t3;
+	#pragma omp target teams distribute parallel for simd 
+		for(i3 = d3; i3 <= mm3-1; i3++){
+			for(i2 = d2; i2 <= mm2-1; i2++){
+				for(i1 = d1; i1 <= mm1-1; i1++){
+					u[2*i3-d3-1][2*i2-d2-1][2*i1-d1-1] =
+						u[2*i3-d3-1][2*i2-d2-1][2*i1-d1-1]
+						+z[i3-1][i2-1][i1-1];
+				}
+				for(i1 = 1; i1 <= mm1-1; i1++){
+					u[2*i3-d3-1][2*i2-d2-1][2*i1-t1-1] =
+						u[2*i3-d3-1][2*i2-d2-1][2*i1-t1-1]
+						+0.5*(z[i3-1][i2-1][i1]+z[i3-1][i2-1][i1-1]);
+				}
+			}
+			for(i2 = 1; i2 <= mm2-1; i2++){
+				for ( i1 = d1; i1 <= mm1-1; i1++) {
+					u[2*i3-d3-1][2*i2-t2-1][2*i1-d1-1] =
+						u[2*i3-d3-1][2*i2-t2-1][2*i1-d1-1]
+						+0.5*(z[i3-1][i2][i1-1]+z[i3-1][i2-1][i1-1]);
+				}
+				for(i1 = 1; i1 <= mm1-1; i1++){
+					u[2*i3-d3-1][2*i2-t2-1][2*i1-t1-1] =
+						u[2*i3-d3-1][2*i2-t2-1][2*i1-t1-1]
+						+0.25*(z[i3-1][i2][i1]+z[i3-1][i2-1][i1]
+								+z[i3-1][i2][i1-1]+z[i3-1][i2-1][i1-1]);
+				}
+			}
+		}
+}
+static void interp_gpu_C(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, int n1, int n2, int n3, int k){
+	#ifdef __clang__
+	using custom_cast = double (*)[mm2][mm1];
+	custom_cast z = reinterpret_cast<custom_cast>(pointer_z);
+	using custom_cast2 = double (*)[n2][n1];
+	custom_cast2 u = reinterpret_cast<custom_cast2>(pointer_u);
+#else
+	double (*z)[mm2][mm1] = (double (*)[mm2][mm1])pointer_z;
+	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
+#endif
+	int i3, i2, i1, d1,d2,d3, t1,t2,t3;
+	#pragma omp target teams distribute parallel for simd
+		for(i3 = 1; i3 <= mm3-1; i3++){
+			for(i2 = d2; i2 <= mm2-1; i2++){
+				for(i1 = d1; i1 <= mm1-1; i1++){
+					u[2*i3-t3-1][2*i2-d2-1][2*i1-d1-1] =
+						u[2*i3-t3-1][2*i2-d2-1][2*i1-d1-1]
+						+0.5*(z[i3][i2-1][i1-1]+z[i3-1][i2-1][i1-1]);
+				}
+				for(i1 = 1; i1 <= mm1-1; i1++){
+					u[2*i3-t3-1][2*i2-d2-1][2*i1-t1-1] =
+						u[2*i3-t3-1][2*i2-d2-1][2*i1-t1-1]
+						+0.25*(z[i3][i2-1][i1]+z[i3][i2-1][i1-1]
+								+z[i3-1][i2-1][i1]+z[i3-1][i2-1][i1-1]);
+				}
+			}
+			for(i2 = 1; i2 <= mm2-1; i2++){
+				for (i1 = d1; i1 <= mm1-1; i1++){
+					u[2*i3-t3-1][2*i2-t2-1][2*i1-d1-1] =
+						u[2*i3-t3-1][2*i2-t2-1][2*i1-d1-1]
+						+0.25*(z[i3][i2][i1-1]+z[i3][i2-1][i1-1]
+								+z[i3-1][i2][i1-1]+z[i3-1][i2-1][i1-1]);
+				}
+				for(i1 = 1; i1 <= mm1-1; i1++){
+					u[2*i3-t3-1][2*i2-t2-1][2*i1-t1-1] =
+						u[2*i3-t3-1][2*i2-t2-1][2*i1-t1-1]
+						+0.125*(z[i3][i2][i1]+z[i3][i2-1][i1]
+								+z[i3][i2][i1-1]+z[i3][i2-1][i1-1]
+								+z[i3-1][i2][i1]+z[i3-1][i2-1][i1]
+								+z[i3-1][i2][i1-1]+z[i3-1][i2-1][i1-1]);
+				}
+			}
+		}
+}
+
+static void interp_gpu(void* pointer_z, int mm1, int mm2, int mm3, void* pointer_u, int n1, int n2, int n3, int k){
+#ifdef __clang__
+	using custom_cast = double (*)[mm2][mm1];
+	custom_cast z = reinterpret_cast<custom_cast>(pointer_z);
+	using custom_cast2 = double (*)[n2][n1];
+	custom_cast2 u = reinterpret_cast<custom_cast2>(pointer_u);
+#else
+	double (*z)[mm2][mm1] = (double (*)[mm2][mm1])pointer_z;
+	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
+#endif
+
+	int i3, i2, i1, d1, d2, d3, t1, t2, t3;
+
+	/* 
+	 * --------------------------------------------------------------------
+	 * note that m = 1037 in globals.h but for this only need to be
+	 * 535 to handle up to 1024^3
+	 * integer m
+	 * parameter( m=535 )
+	 * --------------------------------------------------------------------
+	 */
+
+	if(timeron){timer_start(T_INTERP);}
+	if(n1 != 3 && n2 != 3 && n3 != 3){
+		interp_gpu_A( pointer_z,  mm1,  mm2,  mm3,  pointer_u,  n1,  n2,  n3,  k);
+	}else{
+		if(n1 == 3){
+			d1 = 2;
+			t1 = 1;
+		}else{
+			d1 = 1;
+			t1 = 0;
+		}      
+		if(n2 == 3){
+			d2 = 2;
+			t2 = 1;
+		}else{
+			d2 = 1;
+			t2 = 0;
+		}          
+		if(n3 == 3){
+			d3 = 2;
+			t3 = 1;
+		}else{
+			d3 = 1;
+			t3 = 0;
+		}
+		interp_gpu_B( pointer_z,  mm1,  mm2,  mm3,  pointer_u,  n1,  n2,  n3,  k);
+		interp_gpu_C( pointer_z,  mm1,  mm2,  mm3,  pointer_u,  n1,  n2,  n3,  k);
+        
+	} /* end of else*/
+	if(timeron){timer_stop(T_INTERP);}
+
+	if(debug_vec[0] >= 1){
+		rep_nrm(z,mm1,mm2,mm3,(char*)"z: inter",k-1);
+		rep_nrm(u,n1,n2,n3,(char*)"u: inter",k);
+	}
+	if(debug_vec[5] >= k){
+		showall(z,mm1,mm2,mm3);
+		showall(u,n1,n2,n3);
+	}
+}
+
+
+static void zero3_gpu(void* pointer_z, int n1, int n2, int n3){
+#ifdef __clang__
+		using custom_cast = double (*)[n2][n1];
+		custom_cast z = reinterpret_cast<custom_cast>(pointer_z);
+#else
+		double (*z)[n2][n1] = (double (*)[n2][n1])pointer_z;
+#endif	
+
+	int i3, i2, i1;
+	#pragma omp target teams distribute parallel for simd collapse(3)
+	for(i3 = 0;i3 < n3; i3++){
+		for(i2 = 0; i2 < n2; i2++){
+			for(i1 = 0; i1 < n1; i1++){
+				z[i3][i2][i1] = 0.0;
+			}
+		}
+	}
+}
+
+
+/*
+ * --------------------------------------------------------------------
+ * resid computes the residual: r = v - Au
+ *
+ * this  implementation costs  15A + 4M per result, where
+ * A and M denote the costs of addition (or subtraction) and 
+ * multiplication, respectively. 
+ * presuming coefficient a(1) is zero (the NPB assumes this,
+ * but it is thus not a general case), 3A + 1M may be eliminated,
+ * resulting in 12A + 3M.
+ * note that this vectorizes, and is also fine for cache 
+ * based machines.  
+ * --------------------------------------------------------------------
+ */
+static void resid_gpu(void* pointer_u, void* pointer_v, void* pointer_r, int n1, int n2, int n3, double a[4], int k){
+#ifdef __clang__
+	using custom_cast = double (*)[n2][n1];
+	custom_cast u = reinterpret_cast<custom_cast>(pointer_u);	
+	using custom_cast2 = double (*)[n2][n1];
+	custom_cast2 v = reinterpret_cast<custom_cast2>(pointer_v);
+	using custom_cast3 = double (*)[n2][n1];
+	custom_cast3 r = reinterpret_cast<custom_cast3>(pointer_r);	
+#else
+	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
+	double (*v)[n2][n1] = (double (*)[n2][n1])pointer_v;
+	double (*r)[n2][n1] = (double (*)[n2][n1])pointer_r;		
+#endif
+
+	int i3, i2, i1;
+	
+
+	if(timeron){timer_start(T_RESID);}
+	int T3=32, T2=32, T1=32;
+	#pragma omp target
+	#pragma omp teams distribute parallel for collapse(3) schedule(static)
+	for(int t3 = 1; t3 < n3-1; t3 += T3) {
+		for(int t2 = 1; t2 < n2-1; t2 += T2) {
+			for(int t1 = 1; t1 < n1-1; t1 += T1)
+				for(int i3 = t3; i3 < min(t3 + T3, n3-1); i3++) {
+					for(int i2 = t2; i2 < min(t2 + T2, n2-1); i2++) {
+
+					// Loop over the entire range of i1 without dependencies
+						#pragma omp simd
+						for(int i1 = t1; i1 < min(t1+T1,n1-1); i1++) {
+							// Calculate u1 and u2 for the current, previous, and next positions
+							double u1_prev = u[i3][i2-1][i1-1] + u[i3][i2+1][i1-1]
+											+ u[i3-1][i2][i1-1] + u[i3+1][i2][i1-1];
+							double u1_current = u[i3][i2-1][i1] + u[i3][i2+1][i1]
+											+ u[i3-1][i2][i1] + u[i3+1][i2][i1];
+							double u1_next = u[i3][i2-1][i1+1] + u[i3][i2+1][i1+1]
+											+ u[i3-1][i2][i1+1] + u[i3+1][i2][i1+1];
+
+							double u2_prev = u[i3-1][i2-1][i1-1] + u[i3-1][i2+1][i1-1]
+											+ u[i3+1][i2-1][i1-1] + u[i3+1][i2+1][i1-1];
+							double u2_current = u[i3-1][i2-1][i1] + u[i3-1][i2+1][i1]
+											+ u[i3+1][i2-1][i1] + u[i3+1][i2+1][i1];
+							double u2_next = u[i3-1][i2-1][i1+1] + u[i3-1][i2+1][i1+1]
+											+ u[i3+1][i2-1][i1+1] + u[i3+1][i2+1][i1+1];
+
+							// Update the value of r based on the calculated values
+							r[i3][i2][i1] = v[i3][i2][i1]
+								- a[0] * u[i3][i2][i1]
+								- a[2] * ( u2_current + u1_prev + u1_next )
+								- a[3] * ( u2_prev + u2_next );
+						}
+				}
+			}
+		}
+	}
+
+  
+	if(timeron){timer_stop(T_RESID);}
+
+	/*
+	 * --------------------------------------------------------------------
+	 * exchange boundary data
+	 * --------------------------------------------------------------------
+	 */
+	comm3_gpu(r,n1,n2,n3,k);
+
+	if(debug_vec[0] >= 1){
+		rep_nrm(r,n1,n2,n3,(char*)"   resid",k);
+	}
+
+	if(debug_vec[2] >= k){
+		showall(r,n1,n2,n3);
+	}
+}
+
+
+static void mg3P_gpu(double u[], double v[], double r[], double a[4], double c[4], int n1, int n2, int n3, int k){
+	int j;
+
+	/*
+	 * --------------------------------------------------------------------
+	 * down cycle.
+	 * restrict the residual from the find grid to the coarse
+	 * -------------------------------------------------------------------
+	 */
+	for(k = lt; k >= lb+1; k--){
+		j = k-1;
+		rprj3_gpu(&r[ir[k]], m1[k], m2[k], m3[k], &r[ir[j]], m1[j], m2[j], m3[j], k);
+	}
+
+	k = lb;
+	/*
+	 * --------------------------------------------------------------------
+	 * compute an approximate solution on the coarsest grid
+	 * --------------------------------------------------------------------
+	 */
+	zero3_gpu(&u[ir[k]], m1[k], m2[k], m3[k]);
+	psinv_gpu(&r[ir[k]], &u[ir[k]], m1[k], m2[k], m3[k], c, k);
+
+	for(k = lb+1; k <= lt-1; k++){
+		j = k-1;
+		/*
+		 * --------------------------------------------------------------------
+		 * prolongate from level k-1  to k
+		 * -------------------------------------------------------------------
+		 */
+		zero3_gpu(&u[ir[k]], m1[k], m2[k], m3[k]);
+		interp_gpu(&u[ir[j]], m1[j], m2[j], m3[j], &u[ir[k]], m1[k], m2[k], m3[k], k);
+		/*
+		 * --------------------------------------------------------------------
+		 * compute residual for level k
+		 * --------------------------------------------------------------------
+		 */
+		resid_gpu(&u[ir[k]], &r[ir[k]], &r[ir[k]], m1[k], m2[k], m3[k], a, k);	
+		/*
+		 * --------------------------------------------------------------------
+		 * apply smoother
+		 * --------------------------------------------------------------------
+		 */
+		psinv_gpu(&r[ir[k]], &u[ir[k]], m1[k], m2[k], m3[k], c, k);
+	}
+
+	j = lt - 1;
+	k = lt;
+	interp_gpu(&u[ir[j]], m1[j], m2[j], m3[j], u, n1, n2, n3, k);	
+	resid_gpu(u, v, r, n1, n2, n3, a, k);	
+	psinv_gpu(r, u, n1, n2, n3, c, k);
 }
