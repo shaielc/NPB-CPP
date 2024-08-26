@@ -70,6 +70,7 @@ Authors of the C++ code:
 #define T_NORM2 8
 #define T_COMM3 9
 #define T_LAST 10
+#define TILE_SIZE 16
 
 /* global variables */
 #if defined(DO_NOT_ALLOCATE_ARRAYS_WITH_DYNAMIC_MEMORY_AND_AS_SINGLE_DIMENSION)
@@ -284,17 +285,21 @@ int main(int argc, char *argv[]){
 	printf("\n\n NAS Parallel Benchmarks 4.1 Serial C++ version - MG Benchmark\n\n");
 	printf(" Size: %3dx%3dx%3d (class_npb %1c)\n", nx[lt], ny[lt], nz[lt], class_npb);
 	printf(" Iterations: %3d\n", nit);
-
-	resid(u,v,r,n1,n2,n3,a,k);
-	norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
+	
+	#pragma omp target enter data map(to: u[:NR], v[:NV], r[:NR], c[:4], a[:4])
+	{
+	resid_gpu(u,v,r,n1,n2,n3,a,k);
+	norm2u3_gpu(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
 
 	/*
 	 * ---------------------------------------------------------------------
 	 * one iteration for startup
 	 * ---------------------------------------------------------------------
 	 */
-	mg3P(u,v,r,a,c,n1,n2,n3,k);
-	resid(u,v,r,n1,n2,n3,a,k);
+	mg3P_gpu(u,v,r,a,c,n1,n2,n3,k);
+	resid_gpu(u,v,r,n1,n2,n3,a,k);
+	}
+	#pragma omp target exit data map(from: u[:NR], v[:NV], r[:NR])
 
 	setup(&n1,&n2,&n3,k);
 
@@ -309,14 +314,15 @@ int main(int argc, char *argv[]){
 		timer_clear(i);
 	}
 	timer_start(T_BENCH);
-
-	if(timeron){timer_start(T_RESID2);}
-	resid(u,v,r,n1,n2,n3,a,k);
-	if(timeron){timer_stop(T_RESID2);}
-	norm2u3(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
-
 	#pragma omp target enter data map(to: u[:NR], v[:NV], r[:NR], c[:4], a[:4])
 	{
+
+	if(timeron){timer_start(T_RESID2);}
+	resid_gpu(u,v,r,n1,n2,n3,a,k);
+	if(timeron){timer_stop(T_RESID2);}
+	norm2u3_gpu(r,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
+
+	
 	for(it = 1; it <= nit; it++){
 		if((it==1)||(it==nit)||((it%5)==0)){printf("  iter %3d\n",it);}
 		if(timeron){timer_start(T_MG3P);}
@@ -1340,17 +1346,40 @@ static void norm2u3_gpu(void* pointer_r, int n1, int n2, int n3, double* rnm2, d
 	s = 0.0;
 	*rnmu = 0.0;
 
+	// #pragma omp target
+	// #pragma omp teams distribute parallel for simd collapse(3) reduction(+: s) reduction(max: inf_norm) schedule(dynamic) 
+	// for(int i3 = 1; i3 < n3-1; i3++){
+	// 	for(int i2 = 1; i2 < n2-1; i2++){
+	// 		for(int i1 = 1; i1 < n1-1; i1++){
+	// 			s = s + r[i3*n2*n1 + i2 *n1 +i1] * r[i3*n2*n1 + i2 *n1 +i1];
+	// 			a = fabs(r[i3*n2*n1 + i2 *n1 +i1]);
+	// 			inf_norm = inf_norm < a? a: inf_norm;
+	// 		}
+	// 	}
+	// }
+	int T3 = TILE_SIZE, T2=TILE_SIZE, T1=TILE_SIZE;
 	#pragma omp target
-	#pragma omp teams distribute parallel for simd collapse(3) reduction(+: s) reduction(max: inf_norm) schedule(dynamic) 
-	for(int i3 = 1; i3 < n3-1; i3++){
-		for(int i2 = 1; i2 < n2-1; i2++){
-			for(int i1 = 1; i1 < n1-1; i1++){
-				s = s + r[i3*n2*n1 + i2 *n1 +i1] * r[i3*n2*n1 + i2 *n1 +i1];
-				a = fabs(r[i3*n2*n1 + i2 *n1 +i1]);
-				inf_norm = inf_norm < a? a: inf_norm;
+	#pragma omp teams distribute parallel for collapse(3) reduction(+: s) reduction(max: inf_norm) schedule(dynamic)
+	for(int t3 = 1; t3 < n3-1; t3 += T3) {
+		for(int t2 = 1; t2 < n2-1; t2 += T2) {
+			for(int t1 =1; t1 < n1 -1; t1+=T1){
+				for(int i3 = t3; i3 < min(t3 + T3, n3-1); i3++) {
+					for(int i2 = t2; i2 < min(t2 + T2, n2-1); i2++) {
+						for(int i1 = t1; i1 < min(t1+T1,n1-1); i1++) {
+							// Calculate index only once per iteration
+							int idx = i3 * n2 * n1 + i2 * n1 + i1;
+							double r_val = r[idx];
+
+							s += r_val * r_val;
+							double abs_val = fabs(r_val);
+							inf_norm = inf_norm < abs_val ? abs_val : inf_norm;
+						}
+					}
+				}
 			}
 		}
 	}
+
 
 	*rnm2 = sqrt(s/dn);
 	if(timeron){timer_stop(T_NORM2);}
@@ -1387,45 +1416,52 @@ static void rprj3_gpu(void* pointer_r, int m1k, int m2k, int m3k, void* pointer_
 	}else{
 		d3 = 1;
 	}
+	int T3 =TILE_SIZE, T2=TILE_SIZE, T1=TILE_SIZE;
 	#pragma omp target
-	#pragma omp teams distribute parallel for simd
-	for(int j3 = 1; j3 < m3j-1; j3++){
-		i3 = 2*j3-d3;		
-		for(int j2 = 1; j2 < m2j-1; j2++){
-			
-			i2 = 2*j2-d2;
-			
-			for (int j1 = 1; j1 < m1j - 1; j1++) {
-				int i1 = 2 * j1 - d1;
-				
-				// Calculate x1[i1] and y1[i1] for the current i1
-				double x1_curr = r[i3 + 1][i2][i1] + r[i3 + 1][i2 + 2][i1]
-							+ r[i3][i2 + 1][i1] + r[i3 + 2][i2 + 1][i1];
-				double y1_curr = r[i3][i2][i1] + r[i3 + 2][i2][i1]
-							+ r[i3][i2 + 2][i1] + r[i3 + 2][i2 + 2][i1];
-				
-				// Calculate y2 and x2 based on i1 + 1
-				double y2 = r[i3][i2][i1 + 1] + r[i3 + 2][i2][i1 + 1]
-						+ r[i3][i2 + 2][i1 + 1] + r[i3 + 2][i2 + 2][i1 + 1];
-				double x2 = r[i3 + 1][i2][i1 + 1] + r[i3 + 1][i2 + 2][i1 + 1]
-						+ r[i3][i2 + 1][i1 + 1] + r[i3 + 2][i2 + 1][i1 + 1];
+	#pragma omp teams distribute parallel for collapse(3) schedule(dynamic)
+	for(int t3 = 1; t3 < m3j-1; t3 += T3) {
+		for(int t2 = 1; t2 < m2j-1; t2 += T2) {
+			for (int t1 = 1; t1 < m1j-1; t1 += T1)
+				for(int j3 = t3; j3 < min(t3 + T3, m3j-1); j3++) {
+					for(int j2 = t2; j2 < min(t2 + T2, m2j-1); j2++) {
+					 {
+						#pragma omp simd
+						for (int j1 = t1; j1 < min(t1 + T1, m1j-1); j1++) {
+							int i3 = 2 * j3 - d3;
+							int i2 = 2 * j2 - d2;
+							int i1 = 2 * j1 - d1;
 
-				// Calculate the next x1[i1 + 2] and y1[i1 + 2] for the next iteration
-				int i1_next = i1 + 2;
-				double x1_next = r[i3 + 1][i2][i1_next] + r[i3 + 1][i2 + 2][i1_next]
-							+ r[i3][i2 + 1][i1_next] + r[i3 + 2][i2 + 1][i1_next];
-				double y1_next = r[i3][i2][i1_next] + r[i3 + 2][i2][i1_next]
-							+ r[i3][i2 + 2][i1_next] + r[i3 + 2][i2 + 2][i1_next];
+							// Calculate x1[i1] and y1[i1] for the current i1
+							double x1_curr = r[i3 + 1][i2][i1] + r[i3 + 1][i2 + 2][i1]
+										+ r[i3][i2 + 1][i1] + r[i3 + 2][i2 + 1][i1];
+							double y1_curr = r[i3][i2][i1] + r[i3 + 2][i2][i1]
+										+ r[i3][i2 + 2][i1] + r[i3 + 2][i2 + 2][i1];
 
-				// Calculate s[j3][j2][j1] using the current and next x1 and y1 values
-				s[j3][j2][j1] = 0.5 * r[i3 + 1][i2 + 1][i1 + 1]
-							+ 0.25 * (r[i3 + 1][i2 + 1][i1] + r[i3 + 1][i2 + 1][i1 + 2] + x2)
-							+ 0.125 * (x1_curr + x1_next + y2)
-							+ 0.0625 * (y1_curr + y1_next);
+							// Calculate y2 and x2 based on i1 + 1
+							double y2 = r[i3][i2][i1 + 1] + r[i3 + 2][i2][i1 + 1]
+									+ r[i3][i2 + 2][i1 + 1] + r[i3 + 2][i2 + 2][i1 + 1];
+							double x2 = r[i3 + 1][i2][i1 + 1] + r[i3 + 1][i2 + 2][i1 + 1]
+									+ r[i3][i2 + 1][i1 + 1] + r[i3 + 2][i2 + 1][i1 + 1];
+
+							// Calculate the next x1[i1 + 2] and y1[i1 + 2] for the next iteration
+							int i1_next = i1 + 2;
+							double x1_next = r[i3 + 1][i2][i1_next] + r[i3 + 1][i2 + 2][i1_next]
+										+ r[i3][i2 + 1][i1_next] + r[i3 + 2][i2 + 1][i1_next];
+							double y1_next = r[i3][i2][i1_next] + r[i3 + 2][i2][i1_next]
+										+ r[i3][i2 + 2][i1_next] + r[i3 + 2][i2 + 2][i1_next];
+
+							// Calculate s[j3][j2][j1] using the current and next x1 and y1 values
+							s[j3][j2][j1] = 0.5 * r[i3 + 1][i2 + 1][i1 + 1]
+										+ 0.25 * (r[i3 + 1][i2 + 1][i1] + r[i3 + 1][i2 + 1][i1 + 2] + x2)
+										+ 0.125 * (x1_curr + x1_next + y2)
+										+ 0.0625 * (y1_curr + y1_next);
+						}
+					}
+				}
 			}
-
 		}
 	}
+
 	if(timeron){timer_stop(T_RPRJ3);}
 
 	j=k-1;
@@ -1501,9 +1537,9 @@ static void psinv_gpu(void* pointer_r, void* pointer_u, int n1, int n2, int n3, 
 	
 
 	if(timeron){timer_start(T_PSINV);}
-	int T3=32, T2=32, T1=32;
+	int T3=TILE_SIZE, T2=TILE_SIZE, T1=TILE_SIZE;
 	#pragma omp target
-	#pragma omp teams distribute parallel for collapse(2) schedule(dynamic)
+	#pragma omp teams distribute parallel for collapse(3) schedule(dynamic)
 	for(int t3 = 1; t3 < n3-1; t3 += T3) {
 		for(int t2 = 1; t2 < n2-1; t2 += T2) {
 			for(int t1 = 1; t1 < n1-1; t1 += T1) {
@@ -1567,9 +1603,9 @@ static void interp_gpu_A(void* pointer_z, int mm1, int mm2, int mm3, void* point
 	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
 #endif
 	int i3, i2, i1;
-	int T3=32, T2=32, T1=32;
+	int T3=TILE_SIZE, T2=TILE_SIZE, T1=TILE_SIZE;
 	#pragma omp target
-	#pragma omp teams distribute parallel for collapse(3)
+	#pragma omp teams distribute parallel for collapse(3) schedule(dynamic)
 	for(int t3 = 0; t3 < mm3-1; t3 += T3) {
 		for(int t2 = 0; t2 < mm2-1; t2 += T2) {
 			for(int t1 = 0; t1 < mm1-1; t1 += T1) {
@@ -1656,14 +1692,16 @@ static void interp_gpu_C(void* pointer_z, int mm1, int mm2, int mm3, void* point
 	double (*u)[n2][n1] = (double (*)[n2][n1])pointer_u;
 #endif
 	int i3, i2, i1, d1,d2,d3, t1,t2,t3;
-	#pragma omp target teams distribute parallel for simd
+	#pragma omp target teams distribute parallel for
 		for(i3 = 1; i3 <= mm3-1; i3++){
 			for(i2 = d2; i2 <= mm2-1; i2++){
+                #pragma omp simd
 				for(i1 = d1; i1 <= mm1-1; i1++){
 					u[2*i3-t3-1][2*i2-d2-1][2*i1-d1-1] =
 						u[2*i3-t3-1][2*i2-d2-1][2*i1-d1-1]
 						+0.5*(z[i3][i2-1][i1-1]+z[i3-1][i2-1][i1-1]);
 				}
+                #pragma omp simd
 				for(i1 = 1; i1 <= mm1-1; i1++){
 					u[2*i3-t3-1][2*i2-d2-1][2*i1-t1-1] =
 						u[2*i3-t3-1][2*i2-d2-1][2*i1-t1-1]
@@ -1672,12 +1710,14 @@ static void interp_gpu_C(void* pointer_z, int mm1, int mm2, int mm3, void* point
 				}
 			}
 			for(i2 = 1; i2 <= mm2-1; i2++){
+                #pragma omp simd
 				for (i1 = d1; i1 <= mm1-1; i1++){
 					u[2*i3-t3-1][2*i2-t2-1][2*i1-d1-1] =
 						u[2*i3-t3-1][2*i2-t2-1][2*i1-d1-1]
 						+0.25*(z[i3][i2][i1-1]+z[i3][i2-1][i1-1]
 								+z[i3-1][i2][i1-1]+z[i3-1][i2-1][i1-1]);
 				}
+                #pragma omp simd
 				for(i1 = 1; i1 <= mm1-1; i1++){
 					u[2*i3-t3-1][2*i2-t2-1][2*i1-t1-1] =
 						u[2*i3-t3-1][2*i2-t2-1][2*i1-t1-1]
@@ -1806,7 +1846,7 @@ static void resid_gpu(void* pointer_u, void* pointer_v, void* pointer_r, int n1,
 	
 
 	if(timeron){timer_start(T_RESID);}
-	int T3=32, T2=32, T1=32;
+	int T3=TILE_SIZE, T2=TILE_SIZE, T1=TILE_SIZE;
 	#pragma omp target
 	#pragma omp teams distribute parallel for collapse(3) schedule(static)
 	for(int t3 = 1; t3 < n3-1; t3 += T3) {
@@ -1818,6 +1858,10 @@ static void resid_gpu(void* pointer_u, void* pointer_v, void* pointer_r, int n1,
 					// Loop over the entire range of i1 without dependencies
 						#pragma omp simd
 						for(int i1 = t1; i1 < min(t1+T1,n1-1); i1++) {
+							__builtin_prefetch(&u[i3][i2-1][i1+1], 0, 1);
+							__builtin_prefetch(&u[i3][i2+1][i1+1], 0, 1);
+							__builtin_prefetch(&u[i3-1][i2][i1+1], 0, 1);
+							__builtin_prefetch(&u[i3+1][i2][i1+1], 0, 1);
 							// Calculate u1 and u2 for the current, previous, and next positions
 							double u1_prev = u[i3][i2-1][i1-1] + u[i3][i2+1][i1-1]
 											+ u[i3-1][i2][i1-1] + u[i3+1][i2][i1-1];
