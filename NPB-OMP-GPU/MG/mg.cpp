@@ -1493,7 +1493,7 @@ static void comm3_gpu(void* pointer_u, int n1, int n2, int n3, int kk){
 	if(timeron){timer_start(T_COMM3);}
 	
 	
-	#pragma omp target teams distribute parallel for simd collapse(1) nowait
+	#pragma omp target teams distribute parallel for simd collapse(1)
 	for( i3 = 1; i3 < n3-1; i3++){
 		/* axis = 1 */
 		for( i2 = 1; i2 < n2-1; i2++){
@@ -1508,15 +1508,13 @@ static void comm3_gpu(void* pointer_u, int n1, int n2, int n3, int kk){
 	}
 
 	/* axis = 3 */
-	#pragma omp target teams distribute parallel for simd collapse(2) nowait
+	#pragma omp target teams distribute parallel for simd collapse(2)
 	for( i2 = 0; i2 < n2; i2++){
 		for( i1 = 0; i1 < n1; i1++){
 			u[0][i2][i1] = u[n3-2][i2][i1];
 			u[n3-1][i2][i1] = u[1][i2][i1];			
 		}
 	}
-	
-	#pragma omp taskwait
 
 	if(timeron){timer_stop(T_COMM3);}
 }
