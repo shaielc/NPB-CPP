@@ -49,7 +49,7 @@ C_INC = -I../common
 #---------------------------------------------------------------------------
 # Global *compile time* flags for C programs
 #---------------------------------------------------------------------------
-CFLAGS	= -O3 -qopenmp -qopenmp -mcmodel=medium -fopenmp-targets=spir64 
+CFLAGS	= -O3 -qopenmp -qopenmp -mcmodel=medium -fopenmp-targets=spir64 -D"TILE_SIZE=${TILE_SIZE}"
 
 
 #---------------------------------------------------------------------------
